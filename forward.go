@@ -9,9 +9,12 @@ import (
 	"tailscale.com/tsnet"
 )
 
-// registerSubnetForwarder installs a TCP handler for traffic to advertised
-// subnets. tsnet terminates unmatched flows with RST by default; we dial the
-// real LAN target instead (see tailscale/tailscale#8897).
+// registerSubnetForwarder installs TCP and UDP handlers for traffic to advertised
+// subnets. Call registerSubnetUDPForwarder after srv.Up().
+//
+// tsnet terminates unmatched TCP flows with RST by default; we dial the real LAN
+// target instead (see tailscale/tailscale#8897). Unmatched UDP flows are dropped
+// unless registerSubnetUDPForwarder hooks netstack after startup.
 func registerSubnetForwarder(srv *tsnet.Server, routes []netip.Prefix) {
 	srv.RegisterFallbackTCPHandler(func(src, dst netip.AddrPort) (func(net.Conn), bool) {
 		if !containsAddr(routes, dst.Addr()) {

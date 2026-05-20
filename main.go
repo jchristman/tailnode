@@ -58,6 +58,10 @@ func main() {
 		log.Fatalf("failed to join tailnet: %v", err)
 	}
 
+	if err := registerSubnetUDPForwarder(srv, routes); err != nil {
+		log.Fatalf("udp forwarder: %v", err)
+	}
+
 	lc, err := srv.LocalClient()
 	if err != nil {
 		log.Fatalf("local client: %v", err)

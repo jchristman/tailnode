@@ -1,6 +1,6 @@
 # tailnode
 
-A small Go utility that joins a [Tailscale](https://tailscale.com) tailnet with [tsnet](https://pkg.go.dev/tailscale.com/tsnet) and advertises subnet routes. It forwards TCP traffic to hosts on those subnets so other tailnet devices can reach LAN resources without running the full Tailscale client.
+A small Go utility that joins a [Tailscale](https://tailscale.com) tailnet with [tsnet](https://pkg.go.dev/tailscale.com/tsnet) and advertises subnet routes. It forwards TCP and UDP traffic to hosts on those subnets so other tailnet devices can reach LAN resources without running the full Tailscale client.
 
 ## Requirements
 
