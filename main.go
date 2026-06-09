@@ -21,6 +21,7 @@ func main() {
 	preauthKey := flag.String("preauthkey", "", "Tailscale auth key (overrides .env)")
 	envFile := flag.String("env-file", ".env", "path to .env with AUTH_KEY")
 	hostname := flag.String("hostname", "tailnode", "hostname for this node in the tailnet")
+	loginServer := flag.String("login-server", "", "control server URL (Headscale or custom; default: Tailscale)")
 	stateDir := flag.String("state-dir", "", "directory for tsnet state (default: OS user config dir)")
 	flag.Parse()
 
@@ -38,9 +39,17 @@ func main() {
 		log.Fatalf("invalid --advertise-route: %v", err)
 	}
 
+	controlURL, err := resolveControlURL(*loginServer, *envFile)
+	if err != nil {
+		log.Fatalf("login server: %v", err)
+	}
+
 	srv := &tsnet.Server{
 		Hostname: *hostname,
 		AuthKey:  authKey,
+	}
+	if controlURL != "" {
+		srv.ControlURL = controlURL
 	}
 	if *stateDir != "" {
 		srv.Dir = *stateDir
@@ -52,6 +61,9 @@ func main() {
 	defer stop()
 
 	log.Printf("joining tailnet as %q, advertising %v", *hostname, routes)
+	if controlURL != "" {
+		log.Printf("using control server %q", controlURL)
+	}
 
 	status, err := srv.Up(ctx)
 	if err != nil {

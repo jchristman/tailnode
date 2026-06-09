@@ -35,6 +35,39 @@ func resolvePreauthKey(flagValue, envFile string) (string, error) {
 	return "", fmt.Errorf("%s: no AUTH_KEY or TS_AUTHKEY", envFile)
 }
 
+// resolveControlURL returns a custom control server URL. Priority: --login-server
+// flag, LOGIN_SERVER env, CONTROL_URL env, TS_CONTROL_URL env, then the env file.
+// An empty return value means use the Tailscale default.
+func resolveControlURL(flagValue, envFile string) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
+	}
+	for _, key := range []string{"LOGIN_SERVER", "CONTROL_URL", "TS_CONTROL_URL"} {
+		if v := os.Getenv(key); v != "" {
+			return v, nil
+		}
+	}
+	if envFile == "" {
+		return "", nil
+	}
+	if _, err := os.Stat(envFile); err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	vals, err := loadDotEnv(envFile)
+	if err != nil {
+		return "", err
+	}
+	for _, key := range []string{"LOGIN_SERVER", "CONTROL_URL", "TS_CONTROL_URL"} {
+		if v := vals[key]; v != "" {
+			return v, nil
+		}
+	}
+	return "", nil
+}
+
 func loadDotEnv(path string) (map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {

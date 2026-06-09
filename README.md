@@ -17,10 +17,22 @@ AUTH_KEY=tskey-auth-...
 
 Or set `AUTH_KEY` / `TS_AUTHKEY` in the environment, or pass `--preauthkey`.
 
+For [Headscale](https://headscale.net) or another control server, set the login URL:
+
+```
+LOGIN_SERVER=https://headscale.example.com
+```
+
+Or pass `--login-server`, or set `CONTROL_URL` / `TS_CONTROL_URL`.
+
 ## Usage
 
 ```bash
 go run . --advertise-route 192.168.0.0/24
+```
+
+```bash
+go run . --advertise-route 192.168.0.0/24 --login-server https://headscale.example.com
 ```
 
 Multiple routes can be comma-separated:
@@ -35,6 +47,7 @@ go run . --advertise-route 192.168.0.0/24,10.0.0.0/8
 |------|---------|-------------|
 | `--advertise-route` | *(required)* | Subnet CIDR(s) to advertise |
 | `--preauthkey` | | Auth key (overrides `.env`) |
+| `--login-server` | | Control server URL (Headscale/custom) |
 | `--env-file` | `.env` | Path to env file |
 | `--hostname` | `tailnode` | Hostname in the tailnet |
 | `--state-dir` | | Directory for tsnet state |
