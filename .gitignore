@@ -1,3 +1,5 @@
 .env
 tailnode
-tailnode-linux-amd64
+tailnode.exe
+tailnode-*
+dist/
