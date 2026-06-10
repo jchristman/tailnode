@@ -11,20 +11,31 @@ import (
 
 const backendDialTimeout = 2 * time.Second
 
-// registerSubnetForwarder installs TCP and UDP handlers for traffic to advertised
-// subnets. Call registerSubnetUDPForwarder after srv.Up().
+// registerSubnetTCPForwarder installs a TCP handler for traffic to advertised
+// subnets. Call after srv.Up() so netstack is initialized.
 //
-// tsnet terminates unmatched TCP flows with RST by default; we dial the real LAN
-// target instead (see tailscale/tailscale#8897). Unmatched UDP flows are dropped
-// unless registerSubnetUDPForwarder hooks netstack after startup.
+// We hook netstack.GetTCPHandlerForFlow directly instead of
+// RegisterFallbackTCPHandler so dial-first probes run on gVisor's per-connection
+// goroutines without blocking on tsnet's global mutex.
 //
-// For TCP, the backend is dialed before tsnet completes the client handshake.
+// The backend is dialed before netstack completes the client handshake.
 // Otherwise scanners (e.g. nmap -sS) see SYN-ACK on every port because we used
 // to accept first and only dial afterward.
-func registerSubnetForwarder(srv *tsnet.Server, routes []netip.Prefix) {
-	srv.RegisterFallbackTCPHandler(func(src, dst netip.AddrPort) (func(net.Conn), bool) {
+func registerSubnetTCPForwarder(srv *tsnet.Server, routes []netip.Prefix) error {
+	ns, err := netstackForServer(srv)
+	if err != nil {
+		return err
+	}
+
+	orig := ns.GetTCPHandlerForFlow
+	ns.GetTCPHandlerForFlow = func(src, dst netip.AddrPort) (func(net.Conn), bool) {
+		if orig != nil {
+			if h, intercept := orig(src, dst); intercept && h != nil {
+				return h, true
+			}
+		}
 		if !containsAddr(routes, dst.Addr()) {
-			return nil, false
+			return nil, true
 		}
 		backend, err := net.DialTimeout("tcp", dst.String(), backendDialTimeout)
 		if err != nil {
@@ -33,7 +44,17 @@ func registerSubnetForwarder(srv *tsnet.Server, routes []netip.Prefix) {
 		return func(client net.Conn) {
 			proxyTCP(client, backend)
 		}, true
-	})
+	}
+	return nil
+}
+
+// registerSubnetForwarders installs TCP and UDP handlers for advertised subnets.
+// Call after srv.Up().
+func registerSubnetForwarders(srv *tsnet.Server, routes []netip.Prefix) error {
+	if err := registerSubnetTCPForwarder(srv, routes); err != nil {
+		return err
+	}
+	return registerSubnetUDPForwarder(srv, routes)
 }
 
 func containsAddr(routes []netip.Prefix, addr netip.Addr) bool {

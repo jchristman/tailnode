@@ -55,8 +55,6 @@ func main() {
 		srv.Dir = *stateDir
 	}
 
-	registerSubnetForwarder(srv, routes)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -70,8 +68,8 @@ func main() {
 		log.Fatalf("failed to join tailnet: %v", err)
 	}
 
-	if err := registerSubnetUDPForwarder(srv, routes); err != nil {
-		log.Fatalf("udp forwarder: %v", err)
+	if err := registerSubnetForwarders(srv, routes); err != nil {
+		log.Fatalf("subnet forwarder: %v", err)
 	}
 
 	lc, err := srv.LocalClient()

@@ -15,8 +15,11 @@ import (
 )
 
 // registerSubnetUDPForwarder installs a UDP handler for traffic to advertised
-// subnets. tsnet drops unmatched UDP flows by default; there is no
-// RegisterFallbackUDPHandler yet, so we chain onto netstack's handler after Up.
+// subnets. Call after srv.Up() so netstack is initialized.
+//
+// tsnet drops unmatched UDP flows by default; there is no
+// RegisterFallbackUDPHandler yet, so we chain onto netstack's handler directly
+// (same post-Up reflection pattern as registerSubnetTCPForwarder).
 func registerSubnetUDPForwarder(srv *tsnet.Server, routes []netip.Prefix) error {
 	ns, err := netstackForServer(srv)
 	if err != nil {
@@ -40,6 +43,8 @@ func registerSubnetUDPForwarder(srv *tsnet.Server, routes []netip.Prefix) error 
 	return nil
 }
 
+// netstackForServer reaches the unexported netstack field on tsnet.Server.
+// Shared by registerSubnetTCPForwarder and registerSubnetUDPForwarder.
 func netstackForServer(srv *tsnet.Server) (*netstack.Impl, error) {
 	v := reflect.ValueOf(srv).Elem()
 	f := v.FieldByName("netstack")
