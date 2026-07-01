@@ -9,7 +9,9 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const backendDialTimeout = 2 * time.Second
+const defaultBackendDialTimeout = 500 * time.Millisecond
+
+var backendDialTimeout = defaultBackendDialTimeout
 
 // registerSubnetTCPForwarder installs a TCP handler for traffic to advertised
 // subnets. Call after srv.Up() so netstack is initialized.
@@ -37,7 +39,9 @@ func registerSubnetTCPForwarder(srv *tsnet.Server, routes []netip.Prefix) error 
 		if !containsAddr(routes, dst.Addr()) {
 			return nil, true
 		}
+		acquireDialSlot()
 		backend, err := net.DialTimeout("tcp", dst.String(), backendDialTimeout)
+		releaseDialSlot()
 		if err != nil {
 			return nil, true
 		}

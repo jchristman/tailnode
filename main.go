@@ -23,7 +23,12 @@ func main() {
 	hostname := flag.String("hostname", "tailnode", "hostname for this node in the tailnet")
 	loginServer := flag.String("login-server", "", "control server URL (Headscale or custom; default: Tailscale)")
 	stateDir := flag.String("state-dir", "", "directory for tsnet state (default: OS user config dir)")
+	maxConcurrentDials := flag.Int64("max-concurrent-dials", 64, "max parallel backend TCP dials (0 = unlimited)")
+	backendDialTimeoutFlag := flag.Duration("backend-dial-timeout", defaultBackendDialTimeout, "timeout for backend TCP dials")
 	flag.Parse()
+
+	backendDialTimeout = *backendDialTimeoutFlag
+	initDialLimiter(*maxConcurrentDials)
 
 	if *advertiseRoute == "" {
 		log.Fatal("--advertise-route is required")
