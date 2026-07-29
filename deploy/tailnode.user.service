@@ -1,0 +1,34 @@
+[Unit]
+Description=tailnode subnet router
+Documentation=https://github.com/jchristman/tailnode
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+
+# --state-dir is pinned rather than left to tsnet, which otherwise derives it
+# from the binary's filename. A renamed or staged copy would register as a new
+# node, land on a new tailnet IP, and need its subnet route approved again.
+ExecStart=%h/bin/tailnode \
+    --advertise-route 192.168.0.0/24 \
+    --env-file %h/tailnode.env \
+    --hostname tailnode-jumpbox \
+    --state-dir %h/.config/tsnet-tailnode \
+    --metrics-addr 127.0.0.1:9090
+
+# Each proxied flow holds one descriptor. The default 1024 caps the node at
+# roughly a thousand concurrent flows, which surfaces as backend dial failures.
+LimitNOFILE=65535
+
+# Reap flows whose peer disappeared. The netstack default is a little over two
+# hours, long enough for dead flows to accumulate on a busy node.
+Environment=TS_NETSTACK_KEEPALIVE_IDLE=60s
+Environment=TS_NETSTACK_KEEPALIVE_INTERVAL=15s
+
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
