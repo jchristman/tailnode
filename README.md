@@ -120,32 +120,34 @@ filtering host under churn, they landed on a few percent of dials to ports that
 were merely filtered. Caching any of those would report a filtered port as
 closed, so they are re-dialed on the next flow instead.
 
-### Known limitation: filtered ports are reported as closed
+### Preserving filtered vs closed
 
-When a backend dial fails, the flow is reset, and a client turns that RST into
-"connection refused". That is accurate when the target refused, but a dial also
-fails when the target is *filtering* the port, or when this node hits its own
-dial-slot or connection ceiling. In all of those cases the honest answer is to
-send nothing and let the client time out, which is what makes a scanner report
-"filtered" rather than "closed".
-
-netstack cannot express that. Every path through its `acceptTCP` ends in either
-`Complete(true)`, which resets, or a created endpoint, which completes the
-handshake and makes the port look open; `GetTCPHandlerForFlow` has no way to ask
-for a silent drop. `classifyFlow` therefore decides the correct verdict —
-`verdictReset` only on a refusal, `verdictDrop` for everything ambiguous — and
-`tcpHandlerForFlow` downgrades a drop to a reset, counting it:
+A reset tells the client the port is closed, so the node only sends one when the
+target actually refused the connection. A dial also fails when the target is
+*filtering* the port, or when this node hits its own dial-slot or connection
+ceiling, and none of those prove anything about the port. Those flows are
+dropped without a reply, so the client times out and a scanner reports the port
+as filtered:
 
 | Counter | Meaning |
 |---------|---------|
 | `tailnode_tcp_reset_refused` | Reset because the target refused. The client's "closed" is accurate. |
-| `tailnode_tcp_reset_ambiguous` | Reset where a drop was wanted. The client reports "closed" for a port that was filtered, or for one this node lacked capacity to reach. |
+| `tailnode_tcp_flows_dropped` | Dropped with no reply: a filtered target, or this node out of capacity. |
 
-Measured against a host that drops on closed ports, an `nmap -sT` of 1024 ports
-came back as 1022 "closed (conn-refused)" when every one of those ports was in
-fact filtered. Treat `tailnode_tcp_reset_ambiguous` as the count of scan results
-that cannot be trusted to distinguish closed from filtered. Lifting this needs a
-drop verdict in tailscale's netstack hook.
+Stock netstack cannot express a drop. Every path through its `acceptTCP` ends in
+either `Complete(true)`, which resets, or a created endpoint, which completes the
+handshake and makes the port look open. `vendor/` therefore carries
+[a patch](patches/0001-netstack-tcp-flow-verdict.patch) adding a
+`GetTCPFlowVerdict` hook that can also ask for a drop — see
+[Vendored dependencies](#vendored-dependencies).
+
+Why this matters: measured against two hosts that drop on closed ports, the same
+scan reported one as `filtered (no-response)` and the other as
+`closed (conn-refused)`, and lowering `--backend-dial-timeout` from 500ms to
+150ms flipped the first host's 1022 ports from filtered to closed. Nothing about
+the targets changed. The verdict was decided by whether the node's RST beat the
+scanner's own timeout, which made the results a function of an unrelated
+performance knob.
 
 The practical consequence is that a **filtering** target gets no benefit from the
 cache: every flow pays a full `--backend-dial-timeout` while holding a dial slot,
@@ -258,3 +260,33 @@ the node key expires and has to re-authenticate.
 ```bash
 go build -o tailnode .
 ```
+
+## Vendored dependencies
+
+`vendor/` is committed because it carries a local patch to tailscale's netstack.
+Stock `GetTCPHandlerForFlow` can only accept or reset a flow, and resetting
+reports every unreachable backend as a closed port; the patch adds a
+`GetTCPFlowVerdict` hook that can also drop a flow silently. See
+[Preserving filtered vs closed](#preserving-filtered-vs-closed) for why.
+
+The patches live in `patches/` and are applied on top of `go mod vendor`. Use
+the script rather than calling `go mod vendor` yourself, which would rewrite
+`vendor/` from the module cache and silently discard the patch:
+
+```bash
+./scripts/vendor.sh
+```
+
+Bumping tailscale's version usually means rebasing the patch. Regenerate it by
+editing the vendored file and diffing against the pristine copy in the module
+cache, then commit both the patch and the updated `vendor/`:
+
+```bash
+diff -u --label a/vendor/tailscale.com/wgengine/netstack/netstack.go \
+    "$(go env GOMODCACHE)/tailscale.com@vX.Y.Z/wgengine/netstack/netstack.go" \
+    --label b/vendor/tailscale.com/wgengine/netstack/netstack.go \
+    vendor/tailscale.com/wgengine/netstack/netstack.go
+```
+
+Forgetting to reapply the patch is a build failure, not a silent regression:
+`forward.go` refers to `netstack.TCPFlowDrop`, which only exists once patched.

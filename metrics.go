@@ -69,9 +69,9 @@ var (
 
 	metricResetRefused = newCounter("tailnode_tcp_reset_refused",
 		"flows reset because the target refused the connection; the client's \"closed\" verdict is accurate")
-	metricResetAmbiguous = newCounter("tailnode_tcp_reset_ambiguous",
-		"flows we would rather have dropped silently but had to reset, because netstack cannot drop; "+
-			"the client reports these as closed even though they were filtered or hit our own capacity limits")
+	metricFlowsDropped = newCounter("tailnode_tcp_flows_dropped",
+		"flows dropped without a reply because the backend was unreachable for a reason that does not "+
+			"prove the port is closed: a filtered target, or our own dial or connection ceiling")
 
 	metricConnsAccepted = newCounter("tailnode_tcp_conns_accepted", "client flows accepted for proxying")
 	metricLazyDialFail  = newCounter("tailnode_tcp_lazy_dial_fail", "accepted flows dropped because the deferred backend dial failed")

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"tailscale.com/tsnet"
+	"tailscale.com/wgengine/netstack"
 )
 
 const defaultBackendDialTimeout = 500 * time.Millisecond
@@ -41,9 +42,12 @@ var (
 // registerSubnetTCPForwarder installs a TCP handler for traffic to advertised
 // subnets. Call after srv.Up() so netstack is initialized.
 //
-// We hook netstack.GetTCPHandlerForFlow directly instead of
+// We hook netstack.GetTCPFlowVerdict directly instead of
 // RegisterFallbackTCPHandler so dial-first probes run on gVisor's per-connection
-// goroutines without blocking on tsnet's global mutex.
+// goroutines without blocking on tsnet's global mutex. That hook is a local
+// addition to netstack (patches/0001-netstack-tcp-flow-verdict.patch); the
+// stock GetTCPHandlerForFlow can only accept or reset a flow, and resetting
+// reports every unreachable backend as a closed port.
 //
 // The backend is dialed before netstack completes the client handshake.
 // Otherwise scanners (e.g. nmap -sS) see SYN-ACK on every port because we used
@@ -61,14 +65,16 @@ func registerSubnetTCPForwarder(srv *tsnet.Server, routes []netip.Prefix) error 
 		return err
 	}
 
+	// tsnet installs its own handler for the node's listeners; it keeps first
+	// refusal so srv.Listen and peerapi still work.
 	orig := ns.GetTCPHandlerForFlow
-	ns.GetTCPHandlerForFlow = func(src, dst netip.AddrPort) (func(net.Conn), bool) {
+	ns.GetTCPFlowVerdict = func(src, dst netip.AddrPort) (func(net.Conn), netstack.TCPFlowVerdict) {
 		if orig != nil {
 			if h, intercept := orig(src, dst); intercept && h != nil {
-				return h, true
+				return h, netstack.TCPFlowHandle
 			}
 		}
-		return tcpHandlerForFlow(routes, dst)
+		return tcpFlowVerdict(routes, dst)
 	}
 	return nil
 }
@@ -89,26 +95,21 @@ const (
 	// the honest answer whenever we did not get a refusal from the target:
 	// the port may be filtered, or we may have run out of our own capacity,
 	// and neither is proof that the port is closed.
-	//
-	// netstack cannot express it. Every path through its acceptTCP ends in
-	// either Complete(true), which resets, or a created endpoint, which
-	// completes the handshake and makes the port look open. Until that hook
-	// grows a drop, tcpHandlerForFlow downgrades this to a reset and counts
-	// it in metricResetAmbiguous, so the accuracy lost is at least visible.
 	verdictDrop
 )
 
-// tcpHandlerForFlow adapts a verdict to netstack's hook, which takes a handler
-// and an intercept flag: a nil handler with intercept=true resets the flow.
-func tcpHandlerForFlow(routes []netip.Prefix, dst netip.AddrPort) (func(net.Conn), bool) {
+// tcpFlowVerdict translates our verdict into netstack's.
+func tcpFlowVerdict(routes []netip.Prefix, dst netip.AddrPort) (func(net.Conn), netstack.TCPFlowVerdict) {
 	handler, verdict := classifyFlow(routes, dst)
 	switch verdict {
 	case verdictProxy:
-		return handler, true
+		return handler, netstack.TCPFlowHandle
 	case verdictDrop:
-		metricResetAmbiguous.Add(1)
+		metricFlowsDropped.Add(1)
+		return nil, netstack.TCPFlowDrop
+	default:
+		return nil, netstack.TCPFlowReset
 	}
-	return nil, true
 }
 
 // classifyFlow decides the fate of one flow to an advertised subnet.
