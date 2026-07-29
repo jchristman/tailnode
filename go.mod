@@ -2,7 +2,10 @@ module github.com/jchristman/tailnode
 
 go 1.26.3
 
-require tailscale.com v1.98.2
+require (
+	golang.org/x/sync v0.20.0
+	tailscale.com v1.98.2
+)
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
@@ -40,7 +43,6 @@ require (
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
