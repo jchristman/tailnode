@@ -7,6 +7,11 @@ require (
 	tailscale.com v1.98.2
 )
 
+// Patched fork: GetTCPHandlerForFlow gains sendReset so we can silently drop
+// SYNs (filtered) instead of always RSTing (closed). See
+// github.com/jchristman/tailscale@tailnode-tcp-drop-v1.98.2.
+replace tailscale.com => github.com/jchristman/tailscale v1.98.3-0.20260801030019-2b0c7a1d03f1
+
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
