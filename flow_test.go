@@ -10,9 +10,29 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"tailscale.com/wgengine/netstack"
 )
+
+// flowAction is the netstack hook shape returned by tcpHandlerForFlow.
+type flowAction int
+
+const (
+	flowActionProxy flowAction = iota
+	flowActionReset
+	flowActionDrop
+)
+
+func classifyHook(h func(net.Conn), intercept, sendReset bool) flowAction {
+	if !intercept {
+		panic("tcpHandlerForFlow always intercepts routed decisions")
+	}
+	if h != nil {
+		return flowActionProxy
+	}
+	if sendReset {
+		return flowActionReset
+	}
+	return flowActionDrop
+}
 
 func testRoutes(t *testing.T) []netip.Prefix {
 	t.Helper()
@@ -75,9 +95,9 @@ func setupFlowTest(t *testing.T) {
 func TestFlowOutsideRouteIsReset(t *testing.T) {
 	setupFlowTest(t)
 
-	h, verdict := tcpFlowVerdict(testRoutes(t), netip.MustParseAddrPort("10.0.0.1:22"))
-	if verdict != netstack.TCPFlowReset || h != nil {
-		t.Fatalf("off-route flow: got handler=%v verdict=%v, want nil/reset", h != nil, verdict)
+	h, intercept, sendReset := tcpHandlerForFlow(testRoutes(t), netip.MustParseAddrPort("10.0.0.1:22"))
+	if got := classifyHook(h, intercept, sendReset); got != flowActionReset {
+		t.Fatalf("off-route flow: got handler=%v action=%v, want nil/reset", h != nil, got)
 	}
 }
 
@@ -88,9 +108,9 @@ func TestFlowClosedPortResetsAndCaches(t *testing.T) {
 	setupFlowTest(t)
 	dst := closedPort(t)
 
-	h, verdict := tcpFlowVerdict(testRoutes(t), dst)
-	if verdict != netstack.TCPFlowReset || h != nil {
-		t.Fatalf("closed port: got handler=%v verdict=%v, want nil/reset", h != nil, verdict)
+	h, intercept, sendReset := tcpHandlerForFlow(testRoutes(t), dst)
+	if classifyHook(h, intercept, sendReset) != flowActionReset {
+		t.Fatalf("closed port: got action=%v handler=%v, want nil/reset", classifyHook(h, intercept, sendReset), h != nil)
 	}
 
 	open, cached := reachCache.get(dst)
@@ -104,7 +124,7 @@ func TestFlowClosedPortResetsAndCaches(t *testing.T) {
 	}
 
 	before := metricDialsTotal.Value()
-	if h, verdict := tcpFlowVerdict(testRoutes(t), dst); verdict != netstack.TCPFlowReset || h != nil {
+	if h, intercept, sendReset := tcpHandlerForFlow(testRoutes(t), dst); classifyHook(h, intercept, sendReset) != flowActionReset {
 		t.Fatal("cached closed port should still reset")
 	}
 	if got := metricDialsTotal.Value(); got != before {
@@ -116,9 +136,9 @@ func TestFlowOpenPortProxies(t *testing.T) {
 	setupFlowTest(t)
 	dst := echoBackend(t)
 
-	h, verdict := tcpFlowVerdict(testRoutes(t), dst)
-	if verdict != netstack.TCPFlowHandle || h == nil {
-		t.Fatalf("open port: got handler=%v verdict=%v, want handler/handle", h != nil, verdict)
+	h, intercept, sendReset := tcpHandlerForFlow(testRoutes(t), dst)
+	if classifyHook(h, intercept, sendReset) != flowActionProxy {
+		t.Fatalf("open port: got action=%v handler=%v, want handler/handle", classifyHook(h, intercept, sendReset), h != nil)
 	}
 	if open, cached := reachCache.get(dst); !cached || !open {
 		t.Fatalf("open port should be cached as open; got open=%v cached=%v", open, cached)
@@ -136,8 +156,8 @@ func TestFlowCachedOpenSkipsCallbackDial(t *testing.T) {
 	reachCache.markOpen(dst)
 
 	before := metricDialsTotal.Value()
-	h, verdict := tcpFlowVerdict(testRoutes(t), dst)
-	if verdict != netstack.TCPFlowHandle || h == nil {
+	h, intercept, sendReset := tcpHandlerForFlow(testRoutes(t), dst)
+	if classifyHook(h, intercept, sendReset) != flowActionProxy {
 		t.Fatal("cached-open flow should be accepted")
 	}
 	if got := metricDialsTotal.Value(); got != before {
@@ -169,9 +189,9 @@ func TestFlowConnCeilingDrops(t *testing.T) {
 	}
 	defer releaseConnSlot()
 
-	h, verdict := tcpFlowVerdict(testRoutes(t), dst)
-	if verdict != netstack.TCPFlowDrop || h != nil {
-		t.Fatalf("at the ceiling: got handler=%v verdict=%v, want nil/drop", h != nil, verdict)
+	h, intercept, sendReset := tcpHandlerForFlow(testRoutes(t), dst)
+	if classifyHook(h, intercept, sendReset) != flowActionDrop {
+		t.Fatalf("at the ceiling: got action=%v handler=%v, want nil/drop", classifyHook(h, intercept, sendReset), h != nil)
 	}
 	if metricConnLimited.Value() == 0 {
 		t.Error("expected the connection-limit counter to record the refusal")
@@ -192,11 +212,11 @@ func TestFlowDialSlotExhaustionDrops(t *testing.T) {
 
 	before := metricDialSlotTimeout.Value()
 	start := time.Now()
-	h, verdict := tcpFlowVerdict(testRoutes(t), dst)
+	h, intercept, sendReset := tcpHandlerForFlow(testRoutes(t), dst)
 	elapsed := time.Since(start)
 
-	if verdict != netstack.TCPFlowDrop || h != nil {
-		t.Fatalf("dial slots exhausted: got handler=%v verdict=%v, want nil/drop", h != nil, verdict)
+	if classifyHook(h, intercept, sendReset) != flowActionDrop {
+		t.Fatalf("dial slots exhausted: got action=%v handler=%v, want nil/drop", classifyHook(h, intercept, sendReset), h != nil)
 	}
 	if elapsed > time.Second {
 		t.Fatalf("callback blocked for %s; it must stay bounded to avoid filling netstack's forwarder table", elapsed)
@@ -251,9 +271,9 @@ func TestFlowTimeoutIsNotCached(t *testing.T) {
 	dst := netip.MustParseAddrPort("127.0.0.1:9")
 	routes := testRoutes(t)
 
-	h, verdict := tcpFlowVerdict(routes, dst)
-	if verdict != netstack.TCPFlowDrop || h != nil {
-		t.Fatalf("timed-out dial: got handler=%v verdict=%v, want nil/drop", h != nil, verdict)
+	h, intercept, sendReset := tcpHandlerForFlow(routes, dst)
+	if classifyHook(h, intercept, sendReset) != flowActionDrop {
+		t.Fatalf("timed-out dial: got action=%v handler=%v, want nil/drop", classifyHook(h, intercept, sendReset), h != nil)
 	}
 	if _, cached := reachCache.get(dst); cached {
 		t.Fatal("an ambiguous timeout must not be cached")
@@ -261,7 +281,7 @@ func TestFlowTimeoutIsNotCached(t *testing.T) {
 
 	// The next flow re-dials rather than answering from cache.
 	before := metricDialsTotal.Value()
-	tcpFlowVerdict(routes, dst)
+	tcpHandlerForFlow(routes, dst)
 	if metricDialsTotal.Value() != before+1 {
 		t.Error("expected the next flow to re-dial after an ambiguous failure")
 	}
@@ -284,14 +304,14 @@ func TestFlowRefusedIsCached(t *testing.T) {
 	dst := netip.MustParseAddrPort("127.0.0.1:9")
 	routes := testRoutes(t)
 
-	tcpFlowVerdict(routes, dst)
+	tcpHandlerForFlow(routes, dst)
 	open, cached := reachCache.get(dst)
 	if !cached || open {
 		t.Fatalf("a refusal should be cached as closed; got open=%v cached=%v", open, cached)
 	}
 
 	before := metricDialsTotal.Value()
-	tcpFlowVerdict(routes, dst)
+	tcpHandlerForFlow(routes, dst)
 	if metricDialsTotal.Value() != before {
 		t.Error("a cached refusal must not dial again")
 	}
@@ -398,12 +418,36 @@ func TestDroppedFlowIsCounted(t *testing.T) {
 	dst := stubDial(t, fakeTimeoutError{})
 
 	before := metricFlowsDropped.Value()
-	h, verdict := tcpFlowVerdict(testRoutes(t), dst)
-	if verdict != netstack.TCPFlowDrop || h != nil {
-		t.Fatalf("got handler=%v verdict=%v, want nil/drop", h != nil, verdict)
+	h, intercept, sendReset := tcpHandlerForFlow(testRoutes(t), dst)
+	if classifyHook(h, intercept, sendReset) != flowActionDrop {
+		t.Fatalf("got action=%v handler=%v, want nil/drop", classifyHook(h, intercept, sendReset), h != nil)
 	}
 	if got := metricFlowsDropped.Value(); got != before+1 {
 		t.Errorf("dropped flows = %d, want %d", got, before+1)
+	}
+}
+
+// TestTCPHandlerForFlowDropShape is the contract our Tailscale fork relies on:
+// a drop must be (nil, intercept=true, sendReset=false) so acceptTCP calls
+// Complete(false) instead of sending RST.
+func TestTCPHandlerForFlowDropShape(t *testing.T) {
+	setupFlowTest(t)
+	dst := stubDial(t, fakeTimeoutError{})
+
+	h, intercept, sendReset := tcpHandlerForFlow(testRoutes(t), dst)
+	if h != nil || !intercept || sendReset {
+		t.Fatalf("drop shape = (%v, %v, %v), want (nil, true, false)", h != nil, intercept, sendReset)
+	}
+}
+
+// TestTCPHandlerForFlowResetShape is the counterpart: a refusal must still RST.
+func TestTCPHandlerForFlowResetShape(t *testing.T) {
+	setupFlowTest(t)
+	dst := stubDial(t, &net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)})
+
+	h, intercept, sendReset := tcpHandlerForFlow(testRoutes(t), dst)
+	if h != nil || !intercept || !sendReset {
+		t.Fatalf("reset shape = (%v, %v, %v), want (nil, true, true)", h != nil, intercept, sendReset)
 	}
 }
 
@@ -435,7 +479,7 @@ func TestFlowCachedPathIsConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if h, verdict := tcpFlowVerdict(routes, dst); verdict == netstack.TCPFlowHandle && h != nil {
+			if h, intercept, sendReset := tcpHandlerForFlow(routes, dst); classifyHook(h, intercept, sendReset) == flowActionProxy {
 				accepted.Add(1)
 			}
 		}()
@@ -452,7 +496,7 @@ func TestFlowCachedPathIsConcurrent(t *testing.T) {
 	t.Logf("%d cached accept decisions in %s", flows, elapsed)
 }
 
-func BenchmarkTCPFlowVerdictCached(b *testing.B) {
+func BenchmarkTCPHandlerForFlowCached(b *testing.B) {
 	saved := reachCache
 	reachCache = newReachabilityCache(time.Hour, time.Hour, 4096)
 	defer func() { reachCache = saved }()
@@ -464,7 +508,7 @@ func BenchmarkTCPFlowVerdictCached(b *testing.B) {
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			if h, _ := tcpFlowVerdict(routes, dst); h == nil {
+			if h, _, _ := tcpHandlerForFlow(routes, dst); h == nil {
 				b.Fatal("expected a handler")
 			}
 		}

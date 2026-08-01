@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"tailscale.com/tsnet"
-	"tailscale.com/wgengine/netstack"
 )
 
 const defaultBackendDialTimeout = 500 * time.Millisecond
@@ -42,12 +41,12 @@ var (
 // registerSubnetTCPForwarder installs a TCP handler for traffic to advertised
 // subnets. Call after srv.Up() so netstack is initialized.
 //
-// We hook netstack.GetTCPFlowVerdict directly instead of
+// We hook netstack.GetTCPHandlerForFlow directly instead of
 // RegisterFallbackTCPHandler so dial-first probes run on gVisor's per-connection
-// goroutines without blocking on tsnet's global mutex. That hook is a local
-// addition to netstack (patches/0001-netstack-tcp-flow-verdict.patch); the
-// stock GetTCPHandlerForFlow can only accept or reset a flow, and resetting
-// reports every unreachable backend as a closed port.
+// goroutines without blocking on tsnet's global mutex. Our Tailscale fork adds a
+// sendReset return so a nil handler can silently drop (Complete(false)) instead
+// of always RSTing — stock netstack would report every unreachable backend as a
+// closed port.
 //
 // The backend is dialed before netstack completes the client handshake.
 // Otherwise scanners (e.g. nmap -sS) see SYN-ACK on every port because we used
@@ -68,13 +67,13 @@ func registerSubnetTCPForwarder(srv *tsnet.Server, routes []netip.Prefix) error 
 	// tsnet installs its own handler for the node's listeners; it keeps first
 	// refusal so srv.Listen and peerapi still work.
 	orig := ns.GetTCPHandlerForFlow
-	ns.GetTCPFlowVerdict = func(src, dst netip.AddrPort) (func(net.Conn), netstack.TCPFlowVerdict) {
+	ns.GetTCPHandlerForFlow = func(src, dst netip.AddrPort) (func(net.Conn), bool, bool) {
 		if orig != nil {
-			if h, intercept := orig(src, dst); intercept && h != nil {
-				return h, netstack.TCPFlowHandle
+			if h, intercept, _ := orig(src, dst); intercept && h != nil {
+				return h, true, true
 			}
 		}
-		return tcpFlowVerdict(routes, dst)
+		return tcpHandlerForFlow(routes, dst)
 	}
 	return nil
 }
@@ -98,17 +97,19 @@ const (
 	verdictDrop
 )
 
-// tcpFlowVerdict translates our verdict into netstack's.
-func tcpFlowVerdict(routes []netip.Prefix, dst netip.AddrPort) (func(net.Conn), netstack.TCPFlowVerdict) {
+// tcpHandlerForFlow adapts a verdict to netstack's GetTCPHandlerForFlow hook.
+// Returns (handler, intercept, sendReset). A nil handler with intercept=true
+// and sendReset=false is a silent drop (our Tailscale fork's Complete(false)).
+func tcpHandlerForFlow(routes []netip.Prefix, dst netip.AddrPort) (func(net.Conn), bool, bool) {
 	handler, verdict := classifyFlow(routes, dst)
 	switch verdict {
 	case verdictProxy:
-		return handler, netstack.TCPFlowHandle
+		return handler, true, true
 	case verdictDrop:
 		metricFlowsDropped.Add(1)
-		return nil, netstack.TCPFlowDrop
+		return nil, true, false
 	default:
-		return nil, netstack.TCPFlowReset
+		return nil, true, true
 	}
 }
 

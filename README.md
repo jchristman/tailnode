@@ -134,12 +134,12 @@ as filtered:
 | `tailnode_tcp_reset_refused` | Reset because the target refused. The client's "closed" is accurate. |
 | `tailnode_tcp_flows_dropped` | Dropped with no reply: a filtered target, or this node out of capacity. |
 
-Stock netstack cannot express a drop. Every path through its `acceptTCP` ends in
-either `Complete(true)`, which resets, or a created endpoint, which completes the
-handshake and makes the port look open. `vendor/` therefore carries
-[a patch](patches/0001-netstack-tcp-flow-verdict.patch) adding a
-`GetTCPFlowVerdict` hook that can also ask for a drop — see
-[Vendored dependencies](#vendored-dependencies).
+Stock Tailscale netstack cannot express a drop: a nil handler always
+`Complete(true)` (RST). We depend on a small fork of Tailscale
+(`github.com/jchristman/tailscale`, branch `tailnode-tcp-drop-v1.98.2`) that
+adds a `sendReset` return to `GetTCPHandlerForFlow`, so `(nil, true, false)`
+calls `Complete(false)` and the peer times out as filtered. See
+[Tailscale fork](#tailscale-fork).
 
 Why this matters: measured against two hosts that drop on closed ports, the same
 scan reported one as `filtered (no-response)` and the other as
@@ -261,32 +261,14 @@ the node key expires and has to re-authenticate.
 go build -o tailnode .
 ```
 
-## Vendored dependencies
+## Tailscale fork
 
-`vendor/` is committed because it carries a local patch to tailscale's netstack.
-Stock `GetTCPHandlerForFlow` can only accept or reset a flow, and resetting
-reports every unreachable backend as a closed port; the patch adds a
-`GetTCPFlowVerdict` hook that can also drop a flow silently. See
-[Preserving filtered vs closed](#preserving-filtered-vs-closed) for why.
+`go.mod` replaces `tailscale.com` with
+[`github.com/jchristman/tailscale`](https://github.com/jchristman/tailscale)
+(`v1.98.3-0.20260801030019-2b0c7a1d03f1`, branch `tailnode-tcp-drop-v1.98.2`,
+based on `v1.98.2`). The patch extends `GetTCPHandlerForFlow` with a
+`sendReset` return so subnet forwarding can drop ambiguous failures instead of
+always RSTing. See [Preserving filtered vs closed](#preserving-filtered-vs-closed).
 
-The patches live in `patches/` and are applied on top of `go mod vendor`. Use
-the script rather than calling `go mod vendor` yourself, which would rewrite
-`vendor/` from the module cache and silently discard the patch:
-
-```bash
-./scripts/vendor.sh
-```
-
-Bumping tailscale's version usually means rebasing the patch. Regenerate it by
-editing the vendored file and diffing against the pristine copy in the module
-cache, then commit both the patch and the updated `vendor/`:
-
-```bash
-diff -u --label a/vendor/tailscale.com/wgengine/netstack/netstack.go \
-    "$(go env GOMODCACHE)/tailscale.com@vX.Y.Z/wgengine/netstack/netstack.go" \
-    --label b/vendor/tailscale.com/wgengine/netstack/netstack.go \
-    vendor/tailscale.com/wgengine/netstack/netstack.go
-```
-
-Forgetting to reapply the patch is a build failure, not a silent regression:
-`forward.go` refers to `netstack.TCPFlowDrop`, which only exists once patched.
+When bumping Tailscale, rebase that branch onto the new tag, push, and update
+the `replace` directive.
